@@ -83,3 +83,7 @@ if data_file and rules_file:
 
 st.markdown("---")
 st.markdown("Created with Streamlit")
+
+
+from rules_state_township import run_state_township_checks
+invalid_state, invalid_township = run_state_township_checks(uploaded_file, sheet_name='Screening')
