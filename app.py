@@ -3,8 +3,7 @@ import streamlit as st
 import pandas as pd
 import importlib.util
 import io
-from rules_step1 import run_state_township_checks
-invalid_state, invalid_township = run_state_township_checks('your_excel_file.xlsx', 'Screening')
+
 
 st.set_page_config(page_title="Dynamic Rule-Based Data Verification", layout="wide")
 st.title("📊 Dynamic Rule-Based Data Verification App")
