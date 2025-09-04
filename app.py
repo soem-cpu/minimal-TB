@@ -1,76 +1,86 @@
+
+import streamlit as st
 import pandas as pd
+import importlib.util
+import io
+from rules_step1 import run_state_township_checks
+invalid_state, invalid_township = run_state_township_checks('your_excel_file.xlsx', 'Screening')
 
-def normalize(x):
-    """Robust normalization: strip whitespace, remove hidden chars, title case."""
-    if pd.isnull(x):
-        return ""
-    return str(x).strip().replace('\u200b', '').replace('\t', '').replace('\n', '').title()
+st.set_page_config(page_title="Dynamic Rule-Based Data Verification", layout="wide")
+st.title("📊 Dynamic Rule-Based Data Verification App")
 
-def load_dropdowns(dropdown_df):
-    # Parse first block: State_Region | Township (A1:B359)
-    state_township = dropdown_df.iloc[0:359].dropna()
-    state_township_dict = {}
-    for _, row in state_township.iterrows():
-        state = normalize(row[0])
-        township = normalize(row[1])
-        if state not in state_township_dict:
-            state_township_dict[state] = set()
-        state_township_dict[state].add(township)
-    return state_township_dict
+st.markdown("""
+Upload your **Python rules file** and the **Excel file** you want to verify.
+The app will dynamically apply the rules and show validation tables.
+You can download all results as a single Excel file with multiple sheets.
+""")
 
-def load_service_points(service_df):
-    # Service Point codes
-    svc_set = set(service_df['Service_delivery_point_code'].apply(normalize))
-    return svc_set
+# Upload rules file (.py)
+rules_file = st.file_uploader("Upload your Python rules file (.py)", type=["py"])
+if rules_file:
+    with open("rules_temp.py", "wb") as f:
+        f.write(rules_file.getbuffer())
+    spec = importlib.util.spec_from_file_location("rules_module", "rules_temp.py")
+    rules_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rules_module)
+    st.success("✅ Rules file loaded!")
 
-def check_state_region(df_screen, state_township_dict):
-    """Any State_Region not in dropdown dict keys?"""
-    return df_screen[~df_screen['State_Region'].apply(normalize).isin(state_township_dict.keys())]
+# Upload Excel data file
+data_file = st.file_uploader("Upload Excel file to verify", type=["xlsx", "csv"])
+if data_file and rules_file:
+    # Preview logic
+    if data_file.name.endswith("xlsx"):
+        xls = pd.ExcelFile(data_file)
+        preview_sheet = xls.sheet_names[0]
+        df_preview = xls.parse(preview_sheet)
+        st.write(f"Preview of uploaded data (first sheet: {preview_sheet}):")
+        st.dataframe(df_preview.head())
+    else:
+        df_preview = pd.read_csv(data_file)
+        st.write("Preview of uploaded data:")
+        st.dataframe(df_preview.head())
 
-def check_township(df_screen, state_township_dict):
-    """Is Township valid for State_Region?"""
-    invalid_rows = []
-    for idx, row in df_screen.iterrows():
-        state = normalize(row['State_Region'])
-        township = normalize(row['Township'])
-        if state in state_township_dict:
-            if township not in state_township_dict[state]:
-                invalid_rows.append(idx)
-        else:
-            # Already caught by check_state_region, but include for completeness
-            invalid_rows.append(idx)
-    return df_screen.loc[invalid_rows]
+    # Apply rules
+    try:
+        results = rules_module.check_rules(data_file)
+        excel_output = io.BytesIO()
+        sheet_count = 0
 
-def check_service_point(df_screen, svc_set):
-    """Is Service_delivery_point in Service Point codes?"""
-    return df_screen[~df_screen['Service_delivery_point'].apply(normalize).isin(svc_set)]
+        # Prepare multi-sheet Excel file
+        with pd.ExcelWriter(excel_output, engine='xlsxwriter') as writer:
+            if isinstance(results, dict):
+                st.markdown("## Validation Results:")
+                for k, v in results.items():
+                    st.write(f"**{k}**")
+                    if isinstance(v, pd.DataFrame):
+                        if not v.empty:
+                            st.dataframe(v)
+                        else:
+                            st.success(f"No issues found in {k}!")
+                        v.to_excel(writer, index=False, sheet_name=k[:31])  # Excel sheet names max 31 chars
+                        sheet_count += 1
+                    else:
+                        st.write(v)
+            elif isinstance(results, pd.DataFrame):
+                if results.empty:
+                    st.success("✅ No validation issues found!")
+                else:
+                    st.write("Validation results:")
+                    st.dataframe(results)
+                results.to_excel(writer, index=False, sheet_name="Validation")
+                sheet_count += 1
+            else:
+                st.write(results)
 
-def run_checks(xls_file):
-    # Load sheets
-    xls = pd.ExcelFile(xls_file)
-    df_screen = xls.parse("Screening")
-    df_dropdown = xls.parse("Dropdown")
-    df_service = xls.parse("Service Point")
+        if sheet_count > 0:
+            st.download_button(
+                label="Download ALL Results as Excel (multi-sheet)",
+                data=excel_output.getvalue(),
+                file_name="all_results.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+    except Exception as e:
+        st.error(f"Error running rules: {e}")
 
-    # Load reference data
-    state_township_dict = load_dropdowns(df_dropdown)
-    svc_set = load_service_points(df_service)
-
-    # Debug prints
-    print("Dropdown States:", list(state_township_dict.keys())[:10])
-    print("Dropdown Townships for 'Shan (South)':", state_township_dict.get("Shan (South)", set()))
-    print("Service Point codes:", list(svc_set)[:10])
-    print("Sample Screening State_Region:", df_screen['State_Region'].drop_duplicates().head(5).tolist())
-    print("Sample Screening Township:", df_screen['Township'].drop_duplicates().head(5).tolist())
-    print("Sample Screening Service_delivery_point:", df_screen['Service_delivery_point'].drop_duplicates().head(5).tolist())
-
-    # Checks
-    invalid_state = check_state_region(df_screen, state_township_dict)
-    invalid_township = check_township(df_screen, state_township_dict)
-    invalid_service_point = check_service_point(df_screen, svc_set)
-
-    print(f"\nRows with invalid State_Region: {invalid_state.shape[0]}")
-    print(f"Rows with invalid Township: {invalid_township.shape[0]}")
-    print(f"Rows with invalid Service_delivery_point: {invalid_service_point.shape[0]}")
-
-    return invalid_state, invalid_township, invalid_service_point
+st.markdown("---")
+st.markdown("Created with Streamlit")
